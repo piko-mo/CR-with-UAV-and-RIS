@@ -1,26 +1,18 @@
 import tensorflow as tf
 import numpy as np
-from mappo_reduced import MAPPO_Reduced
+from mappo import MAPPO_Reduced
 
 
 class MAPPO_Pure(MAPPO_Reduced):
     """
-    MAPPO-Pure (Pruning) 算法实现
+    MAPPO-Pure  算法实现
 
-    论文核心思想：
-    标准 MAPPO 的全局状态是所有智能体局部观测的拼接: S = [o_1, o_2, ..., o_m]
-    其中每个 o_i = [PU_state, Specific_Features_i]
-
-    这导致 PU_state 被重复了 M 次。
-    MAPPO-Pure 裁剪了这些冗余: S_pure = [PU_state, Specific_Features_1, ..., Specific_Features_m]
-
-    优点：降低 Critic 输入维度，加速收敛，减少噪声。
     """
 
     def __init__(self, env, num_agents=3, max_episodes=500, max_steps=300,
                  phase_mode='linear', fourier_k=2):
 
-        # 1. 初始化基类（复用 Actor、优化器参数等）
+        # 1. 初始化基类
         super().__init__(env, num_agents, max_episodes, max_steps, phase_mode, fourier_k)
 
         # 2. 计算裁剪后的维度
@@ -33,10 +25,10 @@ class MAPPO_Pure(MAPPO_Reduced):
         print(f"[MAPPO-Pure] 原始全局维度: {self.state_dim * self.num_agents}")
         print(f"[MAPPO-Pure] 裁剪后全局维度: {self.pruned_global_dim} (移除了 {self.num_agents - 1} 个冗余PU状态)")
 
-        # 3. 重新构建 Critic (适应新的输入维度)
+        # 3. 重新构建 Critic
         self.critic = self._build_pure_critic()
 
-        # 重新初始化 Critic 优化器 (确保变量链接正确)
+        # 重新初始化 Critic 优化器
         self.critic_optimizer = tf.keras.optimizers.Adam(
             learning_rate=self.critic_lr, epsilon=1e-5
         )
@@ -65,11 +57,6 @@ class MAPPO_Pure(MAPPO_Reduced):
         """
         核心裁剪逻辑：从拼接的全局状态中提取纯净状态
 
-        Args:
-            full_global_state_batch: Tensor/Array shape (Batch, M * State_Dim)
-                                     包含 [Agent1_Obs, Agent2_Obs, ...]
-        Returns:
-            pruned_state: Tensor shape (Batch, 1 + M * (State_Dim - 1))
         """
         # 转换为 Tensor 方便操作
         x = tf.convert_to_tensor(full_global_state_batch, dtype=tf.float32)
@@ -78,16 +65,15 @@ class MAPPO_Pure(MAPPO_Reduced):
         # 1. 重塑为 (Batch, M, State_Dim)
         x_reshaped = tf.reshape(x, [batch_size, self.num_agents, self.state_dim])
 
-        # 2. 提取唯一的 PU 状态 (取第一个智能体的第0个特征)
+        # 2. 提取唯一的 PU 状态
         # Shape: (Batch, 1)
         pu_state = x_reshaped[:, 0, 0:1]
 
-        # 3. 提取所有智能体的独有特征 (去除每个智能体的第0个特征)
+        # 3. 提取所有智能体的独有特征
         # Shape: (Batch, M, State_Dim-1)
         specific_features = x_reshaped[:, :, 1:]
 
         # 4. 展平独有特征
-        # Shape: (Batch, M * (State_Dim-1))
         specific_flat = tf.reshape(specific_features, [batch_size, -1])
 
         # 5. 拼接
@@ -97,7 +83,7 @@ class MAPPO_Pure(MAPPO_Reduced):
 
     def get_action_and_value(self, states, deterministic=False):
         """重写：计算 Value 时需要先裁剪状态"""
-        # 1. 获取 Actor 输出 (逻辑不变，调用基类逻辑有点复杂，直接复制核心部分)
+        # 1. 获取 Actor 输出
         all_scaled_actions = []
         all_log_probs = []
         all_raw_actions = []
@@ -124,7 +110,7 @@ class MAPPO_Pure(MAPPO_Reduced):
             all_scaled_actions.append(scaled_action)
             all_log_probs.append(log_prob)
 
-        # 2. 计算 Value (核心修改点)
+        # 2. 计算 Value
         # 先拼接成原始全局状态，再裁剪
         raw_global_state = np.concatenate(states).reshape(1, -1).astype(np.float32)
         pruned_state = self._prune_global_state(raw_global_state)
@@ -138,11 +124,11 @@ class MAPPO_Pure(MAPPO_Reduced):
         (states, raw_actions, scaled_actions, rewards,
          values, old_log_probs, dones) = self.rollout_buffer.get_batch()
 
-        # GAE 计算不变
+        # GAE 计算
         advantages, returns = self.compute_gae(rewards, values, dones, last_value)
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
-        # 准备 Actor 需要的局部状态 (从拼接的 states 中切分出来)
+        # 准备 Actor 需要的局部状态
         all_agents_states = []
         for i in range(self.num_agents):
             start_idx = i * self.state_dim
@@ -168,13 +154,12 @@ class MAPPO_Pure(MAPPO_Reduced):
                 # 取出原始拼接状态
                 mb_states_full = states[mb_indices]
 
-                # 【核心修改】裁剪状态用于 Critic
                 mb_states_pruned = self._prune_global_state(mb_states_full)
 
                 mb_advantages = advantages[mb_indices]
                 mb_returns = returns[mb_indices]
 
-                # --- Critic 更新 (使用 pruned state) ---
+                # --- Critic 更新  ---
                 with tf.GradientTape() as tape:
                     value_preds = tf.reshape(self.critic(mb_states_pruned), [-1])
                     critic_loss = tf.reduce_mean(tf.keras.losses.huber(mb_returns, value_preds))
@@ -186,7 +171,7 @@ class MAPPO_Pure(MAPPO_Reduced):
                 )
                 total_critic_loss += critic_loss.numpy()
 
-                # --- Actor 更新 (逻辑不变) ---
+                # --- Actor 更新  ---
                 for i in range(self.num_agents):
                     mb_agent_states = all_agents_states[i][mb_indices]
                     mb_agent_actions = raw_actions[mb_indices, i, :]
@@ -238,9 +223,6 @@ class MAPPO_Pure(MAPPO_Reduced):
         """
         重写 Train 方法，主要是为了修正 last_value 的计算
         """
-        # (这部分代码与基类基本一致，除了 last_value 的计算)
-        # 为了简洁，这里只列出核心循环逻辑
-
         reward_history = []
         rate_history = []
 
@@ -249,7 +231,6 @@ class MAPPO_Pure(MAPPO_Reduced):
             ep_rewards = []
             ep_rates = []
 
-            # 记录历史数据用于绘图
             step_heights = []
             step_powers = []
 
@@ -274,7 +255,6 @@ class MAPPO_Pure(MAPPO_Reduced):
                 self.update_reward_stats(reward)
                 norm_reward = self.normalize_reward(reward)
 
-                # 注意：Buffer 依然存完整的 concatenated states，方便 update 时切割
                 global_state_full = np.concatenate(states)
                 self.rollout_buffer.add(global_state_full, all_raw, combined, norm_reward, value, all_log_probs, done)
 
@@ -291,12 +271,11 @@ class MAPPO_Pure(MAPPO_Reduced):
 
                 states = next_states
 
-            # --- 核心修改：计算 last_value ---
             raw_global_state = np.concatenate(states).reshape(1, -1).astype(np.float32)
             # 使用 pruned state 计算 value
             pruned_state = self._prune_global_state(raw_global_state)
             last_value = self.critic(pruned_state).numpy()[0, 0]
-            # -------------------------------
+
 
             actor_loss, critic_loss, entropy, avg_ratio = self.update(last_value)
 
@@ -321,26 +300,22 @@ class MAPPO_Pure(MAPPO_Reduced):
 
 if __name__ == "__main__":
     from environment import Cognitive_Radio
-    from mappo_reduced import plot_results  # 复用绘图函数
+    from mappo import plot_results  # 复用绘图函数
 
-    # 1. 创建环境
     env = Cognitive_Radio(N=10)
-
-    # 2. 降低难度以快速验证 (可选)
     env.gamma_P = 2.5
 
-    # 3. 初始化 MAPPO-Pure
     print("正在初始化 MAPPO-Pure...")
     mappo_pure = MAPPO_Pure(
         env,
-        max_episodes=1000,  # 论文中使用了较长的训练轮数
+        max_episodes=1000,
         max_steps=300,
         phase_mode='linear'
     )
 
-    # 4. 开始训练
+    # 开始训练
     print("\n开始训练 MAPPO-Pure...")
     r_hist, rate_hist, _, _, _ = mappo_pure.train(print_freq=100)
 
-    # 5. 绘图
+    # 绘图
     plot_results(r_hist, rate_hist, save_path='figures_pure')
