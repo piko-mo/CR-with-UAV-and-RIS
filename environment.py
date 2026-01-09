@@ -1,5 +1,4 @@
 import numpy as np
-import math
 
 
 class Cognitive_Radio:
@@ -7,8 +6,8 @@ class Cognitive_Radio:
         # 系统参数
         self.N = N  # 每个IRS的反射单元数
         self.num_cells = 3  # 小区数量
-        self.K = 2  # 惩罚
-        self.xi = 5  # 奖励系数
+        self.K = 10  # 惩罚
+        self.xi = 3  # 惩罚系数
 
         # 信道参数
         self.C = 10  # 环境参数C
@@ -16,7 +15,6 @@ class Cognitive_Radio:
         self.fc = 2.4e9  # 载波频率 (2.4GHz)
         self.c = 3e8  # 光速 (m/s)
         self.wavelength = self.c / self.fc
-        self.kappa = 0.1  # Rician因子
         self.rho = 10 ** (-40 / 10)  # 参考距离处路径损耗
         self.noise_P = 10 ** (-80 / 10) * 0.001  # 主用户处噪声功率-80dBm
         self.noise_S = 10 ** (-80 / 10) * 0.001  # 次要用户处噪声功率-80dBm
@@ -28,21 +26,18 @@ class Cognitive_Radio:
         # UAV参数
         self.H_max = 30  # 无人机最大飞行高度30m
 
-        # 速率需求（根据蒙特卡洛仿真调整）
-        self.gamma_P = 4.7  # 主用户速率需求（调整后）
-        self.C_req = 0.12  # 次要用户速率需求（调整后）
+        self.gamma_P = 3  # 主用户速率需求
+        self.C_req = 0.25  # 次要用户速率需求
 
         # PU始终活跃（简化模型）
         self.is_pu_active = True
 
-        # ========== 【新增】信道更新控制 ==========
-        self.channel_coherence_steps = 50  # 信道相干步数（每50步更新一次）
+        self.channel_coherence_steps = 50  # 信道相干步数
         self.current_step = 0  # 当前步数计数
         self.cached_channels = None  # 缓存的信道
         self.channel_seed = None  # 当前信道种子
         self.last_uav_heights = None  # 上次的UAV高度（用于检测高度变化）
         self.height_change_threshold = 2.0  # 高度变化阈值（超过则强制更新信道）
-        # ==========================================
 
         # 位置设置和空间设置
         self.setup_locations()
@@ -85,13 +80,9 @@ class Cognitive_Radio:
         self.n_features = 3 + 4 * self.N * 2
 
     def get_local_state(self, agent_id, pu_state, local_uav_height, channels_list, su_rate_state):
-        """
-        构建每个智能体的局部状态
-        """
-        # 1. 归一化高度到 [0, 1]
+
         normalized_height = local_uav_height / self.height_scale
 
-        # 2. 处理信道特征 (展开为实部和虚部)
         channel_feats = []
 
         for ch_vec in channels_list:
@@ -100,7 +91,6 @@ class Cognitive_Radio:
             channel_feats.extend(np.real(norm_ch))
             channel_feats.extend(np.imag(norm_ch))
 
-        # 3. 拼接所有特征
         state = np.concatenate([
             [pu_state],
             [normalized_height],
@@ -111,52 +101,29 @@ class Cognitive_Radio:
         return state.astype(np.float32)
 
     def get_channel(self, l1, l2, height, is_ground_to_ground=False):
-        """
-        计算信道
-        l1: 发射端位置
-        l2: 接收端位置
-        height: UAV高度
-        is_ground_to_ground: 是否为地对地链路
-        """
+
         l2_with_height = l2.copy().astype(float)
         l2_with_height[2] = height if not is_ground_to_ground else l2[2]
 
-        # 计算距离
         d = np.linalg.norm(l2_with_height - l1)
-        d = max(d, 1.0)  # 防止距离为0
-
-        # 信道增益
+        d = max(d, 1.0)
         PL = np.sqrt(self.rho / (d ** 2))
+        K_rician = 10.0
 
         if is_ground_to_ground:
-            # Rician信道模型 - 地对地链路
-            beta = 10  # Rician因子
-
-            # LoS分量
             h_Los = np.exp(-1j * (2 * np.pi / self.wavelength) * d)
-            h_Los = np.repeat(h_Los, self.N)
-
-            # NLoS分量
-            h_NLos = (np.random.randn(self.N) + 1j * np.random.randn(self.N)) / np.sqrt(2)
-
-            # 组合Rician信道
-            h = PL * (np.sqrt(beta / (beta + 1)) * h_Los + np.sqrt(1 / (beta + 1)) * h_NLos)
         else:
-            # 概率性LoS/NLoS模型 - 空地链路
             theta = np.arcsin(min(height / d, 1.0))
-
-            # LoS概率
-            P_Los = 1 / (1 + self.C * np.exp(-self.D * (theta * 180 / np.pi - self.C)))
-
-            # LoS分量
             h_Los = np.exp(-1j * (2 * np.pi / self.wavelength) * d * np.sin(theta))
-            h_Los = np.repeat(h_Los, self.N)
 
-            # NLoS分量
-            h_NLos = (np.random.randn(self.N) + 1j * np.random.randn(self.N)) / np.sqrt(2)
+        h_Los = np.repeat(h_Los, self.N)
 
-            # 组合信道
-            h = PL * (P_Los * h_Los + (1 - P_Los) * self.kappa * h_NLos)
+        h_NLos = (np.random.randn(self.N) + 1j * np.random.randn(self.N)) / np.sqrt(2)
+
+        h = PL * (
+                np.sqrt(K_rician / (K_rician + 1)) * h_Los +
+                np.sqrt(1 / (K_rician + 1)) * h_NLos
+        )
 
         return h
 
@@ -166,13 +133,12 @@ class Cognitive_Radio:
 
         更新条件：
         1. 缓存为空
-        2. 达到信道相干时间（使用 current_step - 1 确保 step 0 不立即更新）
+        2. 达到信道相干时间
         3. UAV高度变化超过阈值
         """
         if self.cached_channels is None:
             return True
 
-        # 使用 (current_step - 1) 确保更新发生在 step 50, 100, ... 而不是 step 49, 99, ...
         if self.current_step > 1 and (self.current_step - 1) % self.channel_coherence_steps == 0:
             return True
 
@@ -187,17 +153,12 @@ class Cognitive_Radio:
     def _update_channels(self, uav_heights, force_update=False):
         """
         更新信道（带缓存机制）
-
-        参数:
-            uav_heights: UAV高度列表
-            force_update: 是否强制更新
         """
         should_update = force_update or self._should_update_channels(uav_heights)
 
         if not should_update:
-            return  # 使用缓存的信道
+            return
 
-        # 【关键】设置固定种子，确保同一相干时间内信道可复现
         seed_offset = self.current_step // self.channel_coherence_steps
         np.random.seed(self.channel_seed + seed_offset)
 
@@ -254,27 +215,11 @@ class Cognitive_Radio:
                         self.L_ST[j], self.L_SR[m], 0, is_ground_to_ground=True
                     )
 
-        # 记录当前高度
         self.last_uav_heights = list(uav_heights)
-
-        # 【重要】恢复随机状态，避免影响其他随机操作（如动作采样）
         np.random.seed(None)
 
     def step(self, action):
-        """
-        环境step函数 - 使用缓存信道
 
-        参数:
-            action: 联合动作向量
-
-        返回:
-            next_states: 各智能体的下一状态列表
-            rewards: 各智能体的奖励列表
-            C_S: 总速率
-            C_s_m_list: 各SU速率列表
-            C_P_list: PU速率列表
-            penalty: 惩罚项
-        """
         self.current_step += 1
 
         # 分解动作
@@ -282,7 +227,6 @@ class Cognitive_Radio:
         action_Phase = action[self.num_cells:self.num_cells + self.N * self.num_cells]  # IRS相位
         action_Rate = action[self.num_cells + self.N * self.num_cells:]  # 发射功率
 
-        # 【修改】使用分段更新的信道
         self._update_channels(action_UAV)
 
         # 从缓存获取信道
@@ -299,7 +243,6 @@ class Cognitive_Radio:
         C_s_m_list = []  # 次要用户速率列表
         C_P = 0  # 主用户速率
 
-        # 只有PU活跃时才计算PU速率
         if self.is_pu_active:
             # 主用户直接接收信号
             direct_signal_P = h_PT_PR
@@ -326,7 +269,7 @@ class Cognitive_Radio:
                 # 累加干扰功率
                 I_ST_at_PR += action_Rate[j] * np.abs(total_interference_j) ** 2
 
-            # 计算主用户的总信号（直接 + 所有RIS反射）
+            # 计算主用户的总信号
             total_signal_P = np.sum(direct_signal_P)
 
             for l in range(self.num_cells):
@@ -338,8 +281,19 @@ class Cognitive_Radio:
                 total_signal_P += np.sum(reflect_signal_P_l)
 
             # 主用户SINR计算
-            SINR_P = self.P_P * np.abs(total_signal_P) ** 2 / (I_ST_at_PR + self.noise_P)
-            C_P = np.log2(1 + SINR_P)
+            # 1. 计算 SINR 分子分母
+            signal_power = self.P_P * np.abs(total_signal_P) ** 2
+            interference_power = I_ST_at_PR + self.noise_P
+
+            # 2. 安全检查：防止除零或 NaN
+            if np.isnan(signal_power) or np.isnan(interference_power):
+                print(f"[Warning] Step {self.current_step}: Signal/Interference is NaN! Actions might be corrupted.")
+                SINR_P = 0.0
+            else:
+                SINR_P = signal_power / (interference_power + 1e-10)
+
+            # 3. 安全计算速率
+            C_P = np.log2(1 + max(SINR_P, 0.0))
 
         # 计算各次要用户的速率
         for m in range(self.num_cells):
@@ -360,7 +314,7 @@ class Cognitive_Radio:
             total_signal_S_m = np.sum(direct_signal_S_m) + np.sum(reflect_signal_S_m)
 
             # 计算次要用户m接收到的干扰
-            # 1. 来自主用户PT的干扰（只有PU活跃时才有）
+            # 1. 来自主用户PT的干扰
             I_PT_at_SR_m = 0
             if self.is_pu_active:
                 pt_sr_direct = h_PT_SR[m]
@@ -376,11 +330,10 @@ class Cognitive_Radio:
                 total_pt_interference = np.sum(pt_sr_direct) + np.sum(pt_sr_reflect)
                 I_PT_at_SR_m = self.P_P * np.abs(total_pt_interference) ** 2
 
-            # 2. 来自其他次要用户的干扰（使用缓存的跨小区信道）
+            # 2. 来自其他次要用户的干扰
             I_ST_at_SR_m = 0
             for j in range(self.num_cells):
                 if j != m:
-                    # 【修改】使用缓存的跨小区干扰信道
                     key = f'{j}_{m}'
                     st_j_sr_m_direct = self.cached_channels['h_ST_SR_cross'][key]
 
@@ -409,23 +362,10 @@ class Cognitive_Radio:
         # 奖励函数
         if C_P >= self.gamma_P:
             S_PU = self.PU_STATES['ACK']
-            # r = C_S + self.xi * penalty
+            r = C_S + self.xi * penalty
         else:
             S_PU = self.PU_STATES['NACK']
-            # violation = max(0, self.gamma_P - C_P)
-            # r = C_S - self.K * violation
-
-        violation = max(0, self.gamma_P - C_P)
-
-        # 基础奖励是总速率
-        r = C_S
-
-        if violation > 0:
-            # 惩罚项：与违反程度成正比
-            r -= self.K * violation
-        else:
-            # 奖励项：给一个小的固定奖励鼓励满足约束，而不是仅仅不扣分
-            r += 0.5  # 达标奖励
+            r = -self.K
 
         # 构建每个智能体的局部状态
         next_states = []
@@ -445,7 +385,7 @@ class Cognitive_Radio:
         """重置环境"""
         # 重置计数器和缓存
         self.current_step = 0
-        self.channel_seed = np.random.randint(0, 1000000)  # 新episode新种子
+        self.channel_seed = np.random.randint(0, 1000000)
         self.cached_channels = None
         self.last_uav_heights = None
 
@@ -475,20 +415,6 @@ class Cognitive_Radio:
             initial_states.append(local_state)
 
         return initial_states
-
-    def set_channel_coherence(self, steps):
-        """
-        设置信道相干步数
-
-        参数:
-            steps: 信道相干步数
-                   - 1: 快变信道（每步都变）
-                   - 50: 中等相干（推荐）
-                   - 100+: 慢变信道
-                   - float('inf'): 静态信道（仅reset时更新）
-        """
-        self.channel_coherence_steps = steps
-        print(f"信道相干步数设置为: {steps}")
 
 
 def monte_carlo_rate_estimation(env, num_samples=1000):
@@ -536,54 +462,6 @@ def monte_carlo_rate_estimation(env, num_samples=1000):
     }
 
 
-def test_channel_coherence(env, coherence_steps_list=[1, 10, 50, 100]):
-    """
-    测试不同信道相干步数下的奖励方差
-    """
-    print("\n" + "=" * 60)
-    print("信道相干步数对奖励方差的影响测试")
-    print("=" * 60)
-
-    results = {}
-
-    for coherence in coherence_steps_list:
-        env.set_channel_coherence(coherence)
-
-        rewards_per_episode = []
-
-        for ep in range(5):  # 测试5个episode
-            env.reset()
-            episode_rewards = []
-
-            # 固定动作，观察奖励变化
-            fixed_action = np.concatenate([
-                [15, 15, 15],
-                np.ones(env.N * env.num_cells) * np.pi,
-                [1.0, 1.0, 1.0]
-            ])
-
-            for step in range(100):
-                _, rewards, _, _, _, _ = env.step(fixed_action)
-                episode_rewards.append(rewards[0])
-
-            rewards_per_episode.append(episode_rewards)
-
-        all_rewards = np.array(rewards_per_episode).flatten()
-        results[coherence] = {
-            'mean': np.mean(all_rewards),
-            'std': np.std(all_rewards),
-            'min': np.min(all_rewards),
-            'max': np.max(all_rewards)
-        }
-
-        print(f"\n信道相干步数 = {coherence}:")
-        print(f"  奖励均值: {results[coherence]['mean']:.4f}")
-        print(f"  奖励标准差: {results[coherence]['std']:.4f}")
-        print(f"  奖励范围: [{results[coherence]['min']:.4f}, {results[coherence]['max']:.4f}]")
-
-    return results
-
-
 # 测试代码
 if __name__ == "__main__":
     env = Cognitive_Radio(N=10)
@@ -603,49 +481,3 @@ if __name__ == "__main__":
     print(f"初始状态[0]前10个元素: {states[0][:10]}")
     print(f"初始状态[0]范围: [{states[0].min():.4f}, {states[0].max():.4f}]")
 
-    # 测试多步（验证信道缓存）
-    print("\n--- 测试信道缓存机制 ---")
-    action = np.concatenate([
-        [15, 15, 15],
-        np.random.uniform(0, 2 * np.pi, env.N * env.num_cells),
-        [0.5, 0.5, 0.5]
-    ])
-
-    rewards_same_channel = []
-    for step in range(env.channel_coherence_steps + 5):
-        next_states, rewards, total_rate, agent_rates, C_P_list, penalty = env.step(action)
-        rewards_same_channel.append(rewards[0])
-
-        if step < 3 or step == env.channel_coherence_steps - 1 or step == env.channel_coherence_steps:
-            print(f"Step {step}: 奖励={rewards[0]:.4f}, PU速率={C_P_list[0]:.4f}")
-
-    # 验证相干时间内奖励一致
-    rewards_before_update = rewards_same_channel[:env.channel_coherence_steps]
-    rewards_after_update = rewards_same_channel[env.channel_coherence_steps:]
-
-    print(f"\n信道更新前奖励标准差: {np.std(rewards_before_update):.6f}")
-    print(f"信道更新后奖励标准差: {np.std(rewards_after_update):.6f}")
-
-    if np.std(rewards_before_update) < 0.001:
-        print("✓ 信道缓存机制工作正常：相干时间内奖励一致")
-    else:
-        print("✗ 警告：相干时间内奖励不一致，请检查缓存机制")
-
-    # 蒙特卡洛速率估计
-    print("\n--- 蒙特卡洛速率估计 ---")
-    stats = monte_carlo_rate_estimation(env, num_samples=1000)
-
-    print(f"PU速率范围: [{stats['PU_rate']['min']:.2f}, {stats['PU_rate']['max']:.2f}]")
-    print(f"PU速率均值: {stats['PU_rate']['mean']:.2f} ± {stats['PU_rate']['std']:.2f}")
-    print(f"PU速率分位数: 10%={stats['PU_rate']['percentile_10']:.2f}, "
-          f"50%={stats['PU_rate']['percentile_50']:.2f}, "
-          f"90%={stats['PU_rate']['percentile_90']:.2f}")
-
-    print(f"\nSU速率范围: [{stats['SU_rate']['min']:.4f}, {stats['SU_rate']['max']:.4f}]")
-    print(f"SU速率均值: {stats['SU_rate']['mean']:.4f} ± {stats['SU_rate']['std']:.4f}")
-    print(f"SU速率分位数: 10%={stats['SU_rate']['percentile_10']:.4f}, "
-          f"50%={stats['SU_rate']['percentile_50']:.4f}, "
-          f"90%={stats['SU_rate']['percentile_90']:.4f}")
-
-    # 测试不同信道相干步数的影响
-    test_channel_coherence(env, [1, 10, 50, 100])
